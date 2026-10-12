@@ -1,0 +1,7 @@
+1_System_Generation/
+2_Steered_MD/
+3_Extract_confgs/
+4_Choose_cfgs/
+5_PMF/
+*.sout
+*.serr
