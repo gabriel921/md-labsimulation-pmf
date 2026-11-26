@@ -114,6 +114,7 @@ is left is the unbiased free energy.
 02  run every umbrella (min → eql → eql2 → production)
 03  (optional, repeatable) extend the umbrellas
 04  WHAM → PMF + error bars + plots
+05  entropic correction + zero reference of the PMF
 ```
 
 ### Step 01 — Building the system
@@ -228,6 +229,65 @@ The output is the PMF. For error bars, **bootstrapping** is used: the
 analysis is repeated many times on randomly resampled data, and the spread of
 the resulting curves gives a standard deviation at each distance.
 
+### Step 05 — Correcting the PMF: entropic correction and zero reference
+
+The PMF that WHAM gives is not yet the final answer, for a geometric reason.
+
+**The problem: distance is a radial coordinate.** The reaction coordinate `d`
+is a distance in 3D space. Think of peptide 1 as fixed and ask where peptide 2
+can be at distance `d` from it: anywhere on a sphere of radius `d`, whose
+surface grows as `4π d²`. Even if the peptides did not interact at all, they
+would be found at large distances far more often than at small ones, simply
+because there is more room. So a flat, interaction-free system would give
+
+```
+P(d) ∝ d²     →     W(d) = − kT ln P(d) = − 2kT ln d + constant
+```
+
+a PMF that slopes **downwards** with distance for purely geometric reasons.
+This slope is not physics of the peptides; it is the Jacobian of going from
+Cartesian space to a radial coordinate. It is also the "entropic term"
+mentioned in Section 7. We remove it by adding it back:
+
+```
+G(d) = W(d) + 2 · kT · ln(d / d₀)
+```
+
+(`2kT` is about 5 kJ/mol per unit of `ln d` at 300 K; between 1 nm and 3 nm the
+correction is roughly 5.5 kJ/mol, which is not negligible.) The choice of the
+reference distance `d₀` only adds a constant, and the zero shift below removes
+it, so it does not change the result.
+
+**When is it *not* applied?** The criterion is **not** whether the PMF has one
+dimension (ours has: a single coordinate). The criterion is whether the
+coordinate is *radial in 3D*. If the coordinate is a Cartesian position or a
+distance projected on a **fixed axis** (e.g. the `z` position of a peptide
+relative to a membrane, `direction` pull geometry in GROMACS), there is no
+growing spherical shell, no Jacobian, and **no entropic correction should be
+applied**: use `--no-entropic`. For the COM–COM distance used in this
+workflow (`pull-coord1-geometry = distance`) the correction **is** applied.
+
+**The zero reference.** A PMF is only defined up to a constant, and WHAM
+chooses that constant arbitrarily. We fix it physically: at large distance the
+peptides do not feel each other, so the corrected PMF should be flat there,
+and we define that flat region as zero. The script averages a *plateau* (by
+default 10 points, taken just before the last 5, which are skipped because the
+edge of a WHAM profile is poorly sampled) and subtracts this average from the
+whole curve. After that, the depth of the well is the free energy of the bound
+state relative to the separated peptides.
+
+**Checks.** Look at the plot: the shaded plateau must lie in a region where the
+corrected curve is really flat. If the curve is still rising or falling there,
+the peptides were not pulled far enough (pull longer, with a bigger box) or the
+plateau choice is wrong (`--ignore-last`, `--average`). Compare the result with
+and without the correction (`--no-entropic`) to see how much of the profile it
+changes. Error bars are the bootstrap standard deviations of step 04; the
+correction is deterministic, so it does not change them.
+
+This step needs the bootstrap output of step 04 (`bsResult.xvg`) and only reads
+it: it writes new files in `5_PMF/analysis/Corrected_PMF/` and does not modify
+any simulation or WHAM result.
+
 ---
 
 ## 6. Checking that the result is trustworthy
@@ -267,12 +327,14 @@ random seed) give a similar PMF.
 A typical dimerisation PMF has:
 
 - a **plateau at large distance** — the peptides no longer feel each other.
-  The free energy there is conventionally set as the reference (zero). Note that for a
-  1D distance coordinate, the far region also contains an *entropic* term that
-  grows with distance (more volume is available), so be careful when comparing
-  the plateau to an experimental binding constant. A rigorous binding free energy needs
-  a correction for this; the raw well depth is best used to **compare** systems
-  (mutants, temperatures, force fields) calculated the same way.
+  The free energy there is conventionally set as the reference (zero), which is
+  what Step 05 does. Because `d` is a radial (3D) distance, the raw WHAM curve
+  also contains an *entropic* term that grows with distance (more volume is
+  available); Step 05 removes it. Even then, the well depth is **not** a
+  standard-state binding free energy (that needs a further concentration/volume
+  correction), so be careful when comparing it to an experimental binding
+  constant. It is best used to **compare** systems (mutants, temperatures,
+  force fields) calculated the same way.
 - a **minimum** at short distance — the bound dimer, with the hydrophobic
   cores in contact. The *position* tells you the contact distance; the *depth*
   tells you how stable it is.
@@ -308,7 +370,10 @@ Limits to keep in mind:
    of the PMF.
 5. Run **03** to extend, and repeat 04. Stop when the PMF no longer changes
    and the error bars are acceptably small.
-6. Report the PMF together with: the reaction coordinate definition, the
+6. Run **05** on the final bootstrap result: entropic correction (only for a
+   radial distance coordinate) and zero reference. Check that the plateau is flat.
+7. Report the PMF together with: the reaction coordinate definition, whether
+   the entropic correction was applied, the plateau used for the zero, the
    force constant and window spacing, the simulation length per window, the
    time discarded, and the error estimate.
 
@@ -327,3 +392,5 @@ Limits to keep in mind:
 | **WHAM** | Weighted Histogram Analysis Method: removes the bias and merges the windows |
 | **Overlap** | Neighbouring histograms sharing some distances; required for WHAM to work |
 | **Bootstrap** | Repeating the analysis on resampled data to estimate the error |
+| **Entropic (Jacobian) correction** | `+ 2kT ln(d/d₀)`: removes the spherical-shell volume (`∝ d²`) contained in a PMF along a radial 3D distance. Not used for Cartesian/fixed-axis coordinates |
+| **Plateau / zero reference** | Flat far-distance region whose average defines zero free energy (unbound state) |
