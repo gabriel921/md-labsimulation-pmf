@@ -11,7 +11,7 @@ The example system is the Aβ16–22 dimer (PDB `2MXU`, chains A and B, central
 residues 17–21 = LVFFA). The pull coordinate is the distance between the
 centres of mass of the central residues of each peptide.
 
-Four scripts drive everything:
+Five scripts drive everything:
 
 | Script | What it does |
 |---|---|
@@ -19,6 +19,7 @@ Four scripts drive everything:
 | **`02_run_pmf_simulation.sh`** | Runs every umbrella: minimisation → equilibration → production |
 | **`03_run_pmf_simulation_extend.sh`** | Extends the production of finished umbrellas, in short blocks |
 | **`04_run_pmf_analysis.sh`** | WHAM → PMF, histograms, bootstrap error bars, plots |
+| **`05_corrected_pmf.sh`** | Entropic (Jacobian) correction + zero-reference shift of the bootstrap PMF |
 
 Steps 2–3 (umbrellas) can run as **SLURM job arrays** or **locally**, one
 umbrella at a time. Both modes use the same `grompp`/`mdrun` commands.
@@ -50,6 +51,7 @@ Clone the repository; no build step is needed.
 ├── 02_run_pmf_simulation.sh
 ├── 03_run_pmf_simulation_extend.sh
 ├── 04_run_pmf_analysis.sh
+├── 05_corrected_pmf.sh
 ├── pmf_config.sh                  # settings for 02, 03 and 04
 ├── 2MXU_16_22_dimer.pdb           # input structure
 ├── mdp/
@@ -128,6 +130,7 @@ if it does not — raise `BOX_PADDING` or shorten the pull). If fewer than
 | Execution | `EXECUTION_MODE`, `MAX_CONCURRENT`, `SLURM_PARTITIONS`, `SLURM_NODES`, `SLURM_NTASKS`, `SLURM_TIME`, `SLURM_EXTRA`, `NT_MIN`, `NT` |
 | Node scratch | `SCRATCH_DIR`, `SCRATCH_SYNC_MIN`, `MAXH_MARGIN_MIN` |
 | Analysis | `WHAM_TEMP`, `WHAM_BEGIN_PS`, `WHAM_END_PS`, `WHAM_UNIT`, `WHAM_BOOTSTRAP`, `WHAM_ZPROF0`, `WHAM_EXTRA`, `PLOT` |
+| Correction (step 05) | Reads `WHAM_TEMP`/`TEMPERATURE`, `WHAM_UNIT` and `PLOT`. The plateau and `r0` settings sit at the top of `05_corrected_pmf.sh` (or use its command-line options) |
 
 > **The values in the shipped `pmf_config.sh` are small test values**
 > (`WINDOW_TO=3`, `PROD_NS=0.01`, `EQL_PS=50`, `EXTEND_NS=0.01`,
@@ -253,6 +256,60 @@ Outputs in `5_PMF/analysis/`:
 **Always look at `histograms.png`:** neighbouring histograms must overlap,
 otherwise the PMF is not reliable there (add windows or lower the spacing).
 
+### Step 05 — Correct the PMF (entropic correction + zero reference)
+
+`gmx wham` gives the PMF as a function of the 3D distance *r* between the two
+centres of mass. Because the volume of the spherical shell grows as *r²*, the
+raw profile is biased towards large distances by an entropic term:
+`W(r) = G(r) − 2RT ln(r)`. Step 05 adds it back,
+
+```
+G(r) = W(r) + 2·R·T·ln(r / r0)
+```
+
+and then shifts the whole profile so that a **plateau** (the far-apart,
+non-interacting region) has an average of zero. The choice of `r0` only adds a
+constant, which the zero shift removes, so it does not change the result.
+
+> The correction is valid when the pull coordinate is a plain COM–COM
+> distance (`pull-coord1-geometry = distance`). Skip it with `--no-entropic`
+> if your geometry is `direction` or `cylinder`.
+
+It needs the **bootstrap** result of step 04 (`bsResult.xvg`), so run step 04
+with `--bootstrap N` first:
+
+```bash
+./05_corrected_pmf.sh                                  # correction + zero shift
+./05_corrected_pmf.sh --no-entropic                    # zero shift only
+./05_corrected_pmf.sh --ignore-last 3 --average 15     # change the plateau
+```
+
+| Option | Meaning | Default |
+|---|---|---|
+| `--entropic` / `--no-entropic` | Apply / skip the `2RT ln(r/r0)` term | apply |
+| `--ignore-last N` | Final points excluded (WHAM edge effects) | 5 |
+| `--average N` | Points averaged just before the excluded ones to define zero | 10 |
+| `--r0 NM` | Reference distance in `ln(r/r0)` | 1.0 |
+| `--temp K` | Temperature | `WHAM_TEMP` / `TEMPERATURE` |
+| `--input FILE` | Use another `bsResult.xvg` | `5_PMF/analysis/bsResult.xvg` |
+
+The plateau is counted in **points**, not nm, so its width depends on the
+number of WHAM bins. The script prints the plateau range in nm — **check that
+the PMF really is flat there** (see the shaded band in the plot). If the
+peptides were not pulled far enough to reach a flat region, the zero reference
+is not meaningful: pull further, or adjust `--ignore-last`/`--average`.
+
+Outputs in `5_PMF/analysis/Corrected_PMF/`:
+
+| File | Content |
+|---|---|
+| `bsResult_corrected.xvg` | Same format as `bsResult.xvg`; only the PMF column is changed (error column untouched) |
+| `pmf_corrected.png` | Corrected PMF with bootstrap error bars and the plateau shaded (if `PLOT=yes` and matplotlib is installed) |
+
+The depth of the minimum is then the free energy of the bound state relative to
+the separated peptides. It is not a standard-state binding free energy: that
+needs an additional concentration/volume correction.
+
 ---
 
 ## 5. Output layout of `5_PMF/`
@@ -264,6 +321,7 @@ otherwise the PMF is not reliable there (add windows or lower the spacing).
 ├── umb2/ ...
 ├── logs/                  job scripts, SLURM logs, config snapshots of every run
 └── analysis/              WHAM results and plots
+    └── Corrected_PMF/     corrected PMF from step 05
 ```
 
 ---
@@ -283,6 +341,9 @@ bash 01_run_pmf_setup.sh
 
 # 4. analysis
 ./04_run_pmf_analysis.sh --begin-ps 2000 --bootstrap 200
+
+# 5. entropic correction + zero reference (needs the bootstrap from step 4)
+./05_corrected_pmf.sh
 ```
 
 ---
@@ -294,4 +355,5 @@ bash 01_run_pmf_setup.sh
 - Hub, J. S., de Groot, B. L., van der Spoel, D. *g_wham — A free weighted
   histogram analysis implementation including robust error and
   autocorrelation estimates.* J. Chem. Theory Comput. 6, 3713 (2010).
+- Trzesniak, D., Kunz, A.-P. E., van Gunsteren, W. F. *A comparison of methods to compute the potential of mean force.* ChemPhysChem 8, 162 (2007).
 - GROMACS manual, section on the pull code and umbrella sampling.
